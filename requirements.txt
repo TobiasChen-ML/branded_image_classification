@@ -1,0 +1,9 @@
+torch>=2.2.0
+torchvision>=0.17.0
+tqdm>=4.66.0
+numpy>=1.24.0
+Pillow>=10.0.0
+icrawler>=0.6.7
+imagehash>=4.3.1
+beautifulsoup4>=4.12.2
+requests>=2.31.0
