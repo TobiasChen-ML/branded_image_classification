@@ -2,10 +2,13 @@ import os
 import json
 import argparse
 from typing import List
+import tempfile
+from urllib.parse import urlparse
 
 import torch
 from PIL import Image
 from torchvision import transforms
+import requests
 
 import sys
 CURR_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +50,7 @@ def parse_args():
     ap.add_argument("--model-artifacts", type=str, required=True, help="path to artifacts/<model>_best directory")
     ap.add_argument("--image", type=str, help="single image path")
     ap.add_argument("--folder", type=str, help="folder of images to batch infer")
+    ap.add_argument("--url", type=str, help="single image URL (http/https/file)")
     ap.add_argument("--use-torchscript", action="store_true", default=True)
     ap.add_argument("--quantize", action="store_true", help="use dynamic quantization (not with torchscript)")
     ap.add_argument("--img-size", type=int, default=None, help="override image size if needed")
@@ -90,6 +94,39 @@ def main():
     if args.image:
         label, probs = infer_image(model, tf, args.image, device, class_names)
         results.append({"path": args.image, "label": label, "probs": probs})
+    elif args.url:
+        parsed = urlparse(args.url)
+        if parsed.scheme in ("file", ""):
+            # file URL or local path (Windows-compatible)
+            if parsed.scheme == "file":
+                if parsed.netloc:
+                    # e.g., file://E:/path -> netloc='E:', path='/path'
+                    local_path = (parsed.netloc + parsed.path).lstrip('/')
+                else:
+                    # e.g., file:///E:/path -> path='/E:/path'
+                    local_path = parsed.path.lstrip('/')
+                local_path = local_path.replace('/', os.sep)
+            else:
+                local_path = args.url
+            label, probs = infer_image(model, tf, local_path, device, class_names)
+            results.append({"path": args.url, "label": label, "probs": probs})
+        elif parsed.scheme in ("http", "https"):
+            try:
+                with requests.get(args.url, timeout=15, stream=True) as r:
+                    r.raise_for_status()
+                    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            if chunk:
+                                tmp.write(chunk)
+                        temp_path = tmp.name
+                label, probs = infer_image(model, tf, temp_path, device, class_names)
+                results.append({"path": args.url, "label": label, "probs": probs})
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+            except Exception as e:
+                results.append({"path": args.url, "error": str(e)})
     elif args.folder:
         for name in os.listdir(args.folder):
             p = os.path.join(args.folder, name)
@@ -101,14 +138,14 @@ def main():
             except Exception as e:
                 results.append({"path": p, "error": str(e)})
     else:
-        raise ValueError("please provide --image or --folder")
+        raise ValueError("please provide --image or --folder or --url")
 
     for r in results:
         if "error" in r:
             print(f"{r['path']} -> ERROR: {r['error']}")
         else:
             print(f"{r['path']} -> {r['label']} | probs={r['probs']}")
-
+            return r['label']
 
 if __name__ == "__main__":
     main()
