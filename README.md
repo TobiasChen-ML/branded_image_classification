@@ -1,87 +1,119 @@
-# 品牌图像三分类（PyTorch，小模型，CUDA训练/CPU推理）
+# Branded Image Classification (PyTorch, end-to-end pipeline)
 
-本项目提供一个内存占用较小的三分类图像分类器：
-- 类别：`0` 非品牌图、`1` logo图、`2` 水印图
-- 训练：使用 CUDA（如可用）与混合精度以减少显存占用、提升速度
-- 推理：在 CPU 上进行，支持 TorchScript 加速与可选动态量化
-- 模型：默认 `resnet18`（小且快），也支持 `resnet34`、`vgg16`
+A lightweight, practical 3-class image classifier for e-commerce content quality and brand monitoring:
+- Classes: `0` ordinary product photos (no logo), `1` brand logos, `2` product photos with watermarks
+- Pipeline: data acquisition → cleaning/dedup → training → inference (supports URL and local paths)
+- Deployment: CPU-friendly TorchScript for inference, with optional CUDA acceleration for training
 
-目录结构建议（自备数据）
-- `data/train/0`, `data/train/1`, `data/train/2`
-- `data/val/0`, `data/val/1`, `data/val/2`（如无 `val`，训练脚本会自动从 `train` 切分）
 
-快速开始
-1) 创建合成示例数据（用于验证管线，非真实业务）：
+## About the Author
+- Tobias Chen — Python/Django developer focused on scalable, maintainable production backends and LLM APP Develop.
+- Skills: Python, Django, REST APIs, Docker, PostgreSQL; ML/data governance; familiar with Celery/Redis and CI/CD.
+- Interests: Web apps + image processing + automation + LLM APP Develop.
+- Contact:
+  - GitHub: https://github.com/TobiasChen-ML/
+  - Email: tobiaschannel1999@gmail.com
+  - Related project: Django-Vectorizer-Web (bitmap to SVG web app): https://github.com/TobiasChen-ML/Django-Vectorizer-Web
+
+
+## Project Overview
+- Goal: automatically detect whether an e-commerce image contains a brand logo or a watermark, to assist moderation and compliance.
+- Models: default `resnet18` (small and fast); also supports `resnet34` and `vgg16`.
+- Training: early stopping, class-imbalance mitigation (class-weighted loss/weighted sampler), and scheduled learning rate.
+- Inference: CPU TorchScript deployment with CLI input via `--image`, `--folder`, or `--url` (http/https/file://).
+- Data augmentation: script to synthesize “product + watermark” images from ordinary product photos to strengthen class 2.
+
+
+## Project Structure
 ```
-python src/prepare_sample_data.py --out-dir data --per-class 100
+branded_image_classification/
+├── artifacts/                 # Training artifacts (best weights and metadata)
+│   └── resnet18_best/
+│       ├── best.pt            # state_dict
+│       ├── best_ts.pt         # TorchScript (CPU-friendly)
+│       └── metadata.json      # model name, class names, image size, etc.
+├── samples/                   # Synthetic sample data (optional)
+├── src/
+│   ├── download_data.py       # Crawl training data for all 3 classes (Bing/Google/Baidu)
+│   ├── download_class2.py     # Targeted crawl for class 2 (product + watermark)
+│   ├── clean_data.py          # Cleaning & dedup (size filter / corruption check / perceptual hash)
+│   ├── prepare_sample_data.py # Generate simple synthetic data to validate the pipeline
+│   ├── augment_watermark.py   # Synthesize “product + watermark” from ordinary product photos
+│   ├── dataset.py             # DataLoader construction and train/val splitting
+│   ├── models.py              # Model factory
+│   ├── train.py               # Training entry
+│   └── infer.py               # Inference entry (supports URL)
+└── requirements.txt
 ```
-2) 从互联网下载真实数据（可选）：
+
+
+## Quick Start
+1) Install dependencies (use a virtual environment if possible):
 ```
 pip install -r requirements.txt
-python src/download_data.py --out-dir data --per-class 300
+```
+
+2) Prepare data (choose one or combine):
+- Generate simple synthetic data (for pipeline validation):
+```
+python src/prepare_sample_data.py --out-dir data --per-class 100 --img-size 256
+```
+- Crawl real data from the web (keywords per class):
+```
+python src/download_data.py --out-dir data --per-class 400 --per-keyword-limit 150 --engine bing
 python src/clean_data.py --data-dir data --dedup --min-width 128 --min-height 128
 ```
-说明：`download_data.py` 默认会分别抓取 0/1/2 类的关键词图片到 `data/train/0|1|2`，你也可以传入自定义关键词：
+  Custom keywords example:
 ```
 python src/download_data.py --out-dir data --per-class 400 \
   --cls0 "street photo" "nature landscape" \
   --cls1 "brand logo vector" "company logo icon" \
   --cls2 "image watermark" "stock photo watermark"
 ```
+- Specifically enrich class 2 (product + watermark):
+```
+python src/download_class2.py --out-dir data --count 800 --per-keyword-limit 200 --engines bing google baidu \
+  --keywords "watermarked product photo" "brand watermark product" "商品 图片 水印"
+```
+- Synthesize class 2 from class 0 (fast augmentation):
+```
+python src/augment_watermark.py --src-dir data/train/0 --out-dir data/train/2 --count 500 --min-width 220 --min-height 220
+```
 
-3) 训练（默认 resnet18，小内存，快）：
+3) Train (example: 50 epochs, ResNet18):
 ```
-python src/train.py --data-dir data --model resnet18 --epochs 10 --batch-size 64 --mixed-precision
+python src/train.py --data-dir data --model resnet18 --epochs 50 --batch-size 64
 ```
-常用参数：
+Common options:
 - `--model {resnet18,resnet34,vgg16}`
-- `--feature-extract` 仅训练分类头，速度更快、显存更低
-- `--img-size 224` 可调小（如 192/160）进一步降内存，但可能降精度
-- `--batch-size` 根据显存调节；开启混合精度可用更大 batch
-- 类不平衡处理：
-  - `--class-weighted-loss` 使用类别权重（按训练集频次反比）
-  - `--weighted-sampler` 训练集使用加权采样（提升少数类采样概率）
-- 早停（避免过拟合与节约时间）：
-  - `--es-metric {val_acc,val_loss}` 监控指标（默认 `val_acc`）
-  - `--es-patience 5` 容忍未提升的轮数
-  - `--es-min-delta 1e-4` 最小提升幅度
+- `--feature-extract` to train only the classifier head (faster, lower memory)
+- `--img-size 224` can be adjusted (e.g., 192/160) to reduce memory, with possible accuracy trade-offs
+- Class imbalance: `--class-weighted-loss`, `--weighted-sampler`
+- Early stopping: `--es-metric {val_acc,val_loss}`, `--es-patience`, `--es-min-delta`
+- On Windows, if `num_workers>0` causes an issue, set `--num-workers 0`
 
-4) 推理（CPU，快速）：
+4) Inference (CPU, URL supported):
+- Single local path:
 ```
-python src/infer.py --model-artifacts artifacts/resnet18_best --image path/to/test.jpg
+python src/infer.py --model-artifacts artifacts/resnet18_best --image E:\path\to\image.jpg
 ```
-或对文件夹批量：
+- Single URL (HTTP/HTTPS/file://):
 ```
-python src/infer.py --model-artifacts artifacts/resnet18_best --folder path/to/images
+python src/infer.py --model-artifacts artifacts/resnet18_best --url "https://example.com/image.jpg"
+python src/infer.py --model-artifacts artifacts/resnet18_best --url file:///E:/MyCode/branded_image_classification/samples/train/2/00000.jpg
 ```
-可选：
-- `--use-torchscript`（默认开启）使用 TorchScript 加速
-- `--quantize` 对线性层做动态量化（不与 TorchScript 同时使用）
-
-数据准备建议
-- 使用 `ImageFolder` 结构，分别放置 0/1/2 三类图片
-- 图片尺寸不限，脚本会自动缩放到 `--img-size`
-- 如果暂时没有数据，可用 `prepare_sample_data.py` 生成简易合成数据先跑通流程
-
-训练细节
-- 优化器：AdamW，`lr=3e-4` 默认
-- 学习率调度：StepLR（每 5 个 epoch 衰减 0.1）
-- 损失：CrossEntropyLoss
-- 增广：随机裁剪、水平翻转、轻微颜色抖动（可根据数据情况调整）
-- 保存：`artifacts/<model>_best/` 下保存 `best.pt`（state_dict）、`best_ts.pt`（TorchScript）、`metadata.json`（模型/类别/尺寸等）
-
-推理细节
-- 读取 `metadata.json` 还原模型结构与类别名
-- 默认为 CPU 推理；可选 TorchScript 加速或动态量化（线性层）
-
-依赖安装
+- Batch folder:
 ```
-pip install -r requirements.txt
+python src/infer.py --model-artifacts artifacts/resnet18_best --folder E:\path\to\images
 ```
+Notes: the inference script reads `metadata.json` to restore model structure and class names. TorchScript is enabled by default (`--use-torchscript`).
 
-在 Windows 上的注意事项
-- 如果 `DataLoader` 的 `num_workers>0` 遇到问题，可改为 `0`
-- 请使用 `python` 直接运行脚本；确保 `src` 目录在同级
 
-许可证
-- 本项目遵循仓库中的 `LICENSE`
+## FAQ / Notes
+- CUDA acceleration: the project supports CPU inference; training can leverage CUDA-enabled `torch/torchvision/torchaudio` when available. Under restricted network conditions, CPU-only setups can still validate the pipeline.
+- Windows paths and URLs: use `file:///E:/...` for Windows file URLs; examples above are compatible.
+- Data quality: always run cleaning and dedup (`clean_data.py`) on crawled data; prefer real e-commerce images for stronger generalization.
+
+
+## License
+- This project follows the `LICENSE` in the repository.
